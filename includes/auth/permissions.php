@@ -30,8 +30,8 @@ function requireSuperAdmin(): void
 {
     requireLogin();
 
-    if (!isSuperAdmin()) {
-        http_response_code(403);
-        exit('Access denied. Super administrator privileges are required.');
-    }
+  if (!isSuperAdmin()) {
+    header('Location: /jutsue-portfolio/admin/access-denied.php');
+    exit;
+}
 }
