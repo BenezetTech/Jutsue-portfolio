@@ -8,9 +8,6 @@ require_once '../../includes/auth/auth.php';
 
 requireLogin();
 
-$errors = [];
-
-// Get gallery ID
 $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 
 if ($id <= 0) {
@@ -18,15 +15,9 @@ if ($id <= 0) {
     exit;
 }
 
-// Fetch existing gallery item
+// Fetch gallery item
 $stmt = $pdo->prepare("
-    SELECT
-        id,
-        title,
-        image,
-        category,
-        description,
-        display_order
+    SELECT id, title, image, category, description, display_order
     FROM gallery
     WHERE id = ?
     LIMIT 1
@@ -34,33 +25,34 @@ $stmt = $pdo->prepare("
 
 $stmt->execute([$id]);
 
-$gallery = $stmt->fetch(PDO::FETCH_ASSOC);
+$galleryItem = $stmt->fetch(PDO::FETCH_ASSOC);
 
-if (!$gallery) {
+if (!$galleryItem) {
     header('Location: index.php?not_found=1');
     exit;
 }
 
-// Existing values
-$title = $gallery['title'];
-$category = $gallery['category'];
-$description = $gallery['description'];
-$display_order = $gallery['display_order'];
-$currentImage = $gallery['image'];
+$errors = [];
 
-// Upload directory
-$uploadDir = '../../assets/uploads/gallery/';
-$uploadPath = 'assets/uploads/gallery/';
+$title = $galleryItem['title'];
+$category = $galleryItem['category'] ?? '';
+$description = $galleryItem['description'] ?? '';
+$display_order = $galleryItem['display_order'];
+$currentImage = $galleryItem['image'];
 
-// Handle form submission
+$uploadDirectory = '../../assets/uploads/gallery/';
+
+// Create upload directory if necessary
+if (!is_dir($uploadDirectory)) {
+    mkdir($uploadDirectory, 0755, true);
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $title = trim($_POST['title'] ?? '');
     $category = trim($_POST['category'] ?? '');
     $description = trim($_POST['description'] ?? '');
-    $display_order = isset($_POST['display_order'])
-        ? (int) $_POST['display_order']
-        : 0;
+    $display_order = trim($_POST['display_order'] ?? '0');
 
     // Validate title
     if ($title === '') {
@@ -68,195 +60,186 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Validate display order
-    if ($display_order < 0) {
-        $errors[] = 'Display order cannot be negative.';
+    if ($display_order === '') {
+        $display_order = '0';
     }
 
-    // Check whether a new image was selected
-    $newImageSelected = (
+    if (
+        !filter_var($display_order, FILTER_VALIDATE_INT) &&
+        $display_order !== '0'
+    ) {
+        $errors[] = 'Display order must be a valid whole number.';
+    }
+
+    $newUploadedFileName = null;
+    $newImagePath = $currentImage;
+
+    // Check whether a replacement image was uploaded
+    $hasNewImage =
         isset($_FILES['image']) &&
-        $_FILES['image']['error'] !== UPLOAD_ERR_NO_FILE
-    );
+        $_FILES['image']['error'] !== UPLOAD_ERR_NO_FILE;
 
-    if ($newImageSelected) {
+    if ($hasNewImage) {
 
-        $file = $_FILES['image'];
+        if ($_FILES['image']['error'] !== UPLOAD_ERR_OK) {
 
-        // Check upload error
-        if ($file['error'] !== UPLOAD_ERR_OK) {
-
-            $errors[] = 'There was a problem uploading the new image.';
+            $errors[] =
+                'There was a problem uploading the replacement image.';
 
         } else {
 
-            // Maximum file size: 5MB
+            $file = $_FILES['image'];
+
+            // Maximum file size: 5 MB
             $maxFileSize = 5 * 1024 * 1024;
 
             if ($file['size'] > $maxFileSize) {
-                $errors[] = 'Image size must not exceed 5MB.';
+                $errors[] = 'Image size must not exceed 5 MB.';
             }
 
-            // Check that it is a real uploaded file
-            if (!is_uploaded_file($file['tmp_name'])) {
-                $errors[] = 'Invalid file upload.';
-            }
-
-            // Secure MIME type detection
+            // Verify actual MIME type
             if (empty($errors)) {
 
-                $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                $mimeType = $finfo->file($file['tmp_name']);
 
-                if ($finfo === false) {
+                $allowedMimeTypes = [
+                    'image/jpeg' => 'jpg',
+                    'image/png'  => 'png',
+                    'image/webp' => 'webp'
+                ];
 
-                    $errors[] = 'Unable to verify the image file type.';
-
-                } else {
-
-                    $mimeType = finfo_file(
-                        $finfo,
-                        $file['tmp_name']
-                    );
-
-                    finfo_close($finfo);
-
-                    $allowedTypes = [
-                        'image/jpeg' => 'jpg',
-                        'image/png'  => 'png',
-                        'image/webp' => 'webp'
-                    ];
-
-                    if (!array_key_exists($mimeType, $allowedTypes)) {
-                        $errors[] =
-                            'Only JPG, JPEG, PNG, and WEBP images are allowed.';
-                    }
+                if (!isset($allowedMimeTypes[$mimeType])) {
+                    $errors[] =
+                        'Only JPG, JPEG, PNG, and WEBP images are allowed.';
                 }
+            }
+
+            // Verify actual image
+            if (empty($errors)) {
+
+                $imageInfo = @getimagesize($file['tmp_name']);
+
+                if ($imageInfo === false) {
+                    $errors[] =
+                        'The uploaded file is not a valid image.';
+                }
+            }
+
+            // Save replacement image
+            if (empty($errors)) {
+
+                try {
+
+                    $randomName = bin2hex(random_bytes(16));
+
+                    $extension = $allowedMimeTypes[$mimeType];
+
+                    $newUploadedFileName =
+                        $randomName . '.' . $extension;
+
+                    $destination =
+                        $uploadDirectory . $newUploadedFileName;
+
+                    if (
+                        !move_uploaded_file(
+                            $file['tmp_name'],
+                            $destination
+                        )
+                    ) {
+                        $errors[] =
+                            'The replacement image could not be saved.';
+                    }
+
+                } catch (Exception $e) {
+
+                    $errors[] =
+                        'Could not generate a secure image filename.';
+                }
+            }
+
+            if (empty($errors)) {
+
+                $newImagePath =
+                    'assets/uploads/gallery/' .
+                    $newUploadedFileName;
             }
         }
     }
 
-    // If validation passes
+    // Update database
     if (empty($errors)) {
+
+        $stmt = $pdo->prepare("
+            UPDATE gallery
+            SET
+                title = ?,
+                image = ?,
+                category = ?,
+                description = ?,
+                display_order = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ");
 
         try {
 
-            /*
-             * If a new image was selected,
-             * upload it and update the image path.
-             */
-            if ($newImageSelected) {
+            $stmt->execute([
+                $title,
+                $newImagePath,
+                $category !== '' ? $category : null,
+                $description !== '' ? $description : null,
+                (int) $display_order,
+                $id
+            ]);
 
-                $extension = $allowedTypes[$mimeType];
+            // Remove old image only after successful database update
+            if (
+                $newUploadedFileName !== null &&
+                !empty($currentImage)
+            ) {
 
-                // Generate a unique filename
-                $newFileName =
-                    bin2hex(random_bytes(16))
-                    . '.'
-                    . $extension;
+                $oldImagePath =
+                    '../../' . ltrim($currentImage, '/');
 
-                $destination =
-                    $uploadDir . $newFileName;
+                $galleryDirectory =
+                    realpath($uploadDirectory);
 
-                $newDatabaseImagePath =
-                    $uploadPath . $newFileName;
+                $oldFileRealPath =
+                    realpath($oldImagePath);
 
-                // Make sure upload directory exists
-                if (!is_dir($uploadDir)) {
-                    mkdir($uploadDir, 0755, true);
+                if (
+                    $galleryDirectory !== false &&
+                    $oldFileRealPath !== false &&
+                    strpos(
+                        $oldFileRealPath,
+                        $galleryDirectory . DIRECTORY_SEPARATOR
+                    ) === 0 &&
+                    is_file($oldFileRealPath)
+                ) {
+                    unlink($oldFileRealPath);
                 }
-
-                // Move new image
-                if (!move_uploaded_file(
-                    $file['tmp_name'],
-                    $destination
-                )) {
-
-                    $errors[] =
-                        'Failed to save the new uploaded image.';
-
-                } else {
-
-                    // Update database including new image
-                    $stmt = $pdo->prepare("
-                        UPDATE gallery
-                        SET
-                            title = ?,
-                            image = ?,
-                            category = ?,
-                            description = ?,
-                            display_order = ?
-                        WHERE id = ?
-                    ");
-
-                    $stmt->execute([
-                        $title,
-                        $newDatabaseImagePath,
-                        $category,
-                        $description,
-                        $display_order,
-                        $id
-                    ]);
-
-                    // Delete old image
-                    if (
-                        !empty($currentImage) &&
-                        strpos($currentImage, 'assets/uploads/gallery/') === 0
-                    ) {
-
-                        $oldImagePath =
-                            '../../' . $currentImage;
-
-                        if (
-                            file_exists($oldImagePath) &&
-                            is_file($oldImagePath)
-                        ) {
-                            unlink($oldImagePath);
-                        }
-                    }
-
-                    header('Location: index.php?updated=1');
-                    exit;
-                }
-
-            } else {
-
-                /*
-                 * No new image selected.
-                 * Keep the existing image.
-                 */
-                $stmt = $pdo->prepare("
-                    UPDATE gallery
-                    SET
-                        title = ?,
-                        category = ?,
-                        description = ?,
-                        display_order = ?
-                    WHERE id = ?
-                ");
-
-                $stmt->execute([
-                    $title,
-                    $category,
-                    $description,
-                    $display_order,
-                    $id
-                ]);
-
-                header('Location: index.php?updated=1');
-                exit;
             }
+
+            header('Location: index.php?updated=1');
+            exit;
 
         } catch (PDOException $e) {
 
-            // Remove newly uploaded file if database update fails
+            // Remove newly uploaded image if database update fails
             if (
-                isset($destination) &&
-                file_exists($destination)
+                $newUploadedFileName !== null &&
+                is_file(
+                    $uploadDirectory . $newUploadedFileName
+                )
             ) {
-                unlink($destination);
+                unlink(
+                    $uploadDirectory . $newUploadedFileName
+                );
             }
 
             $errors[] =
-                'Failed to update the gallery item.';
+                'Gallery item could not be updated. Please try again.';
         }
     }
 }
@@ -275,7 +258,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Edit Gallery Item | Admin</title>
+    <title>Edit Gallery Item | Admin Dashboard</title>
 
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -284,47 +267,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 </head>
 
-<body>
+<body class="bg-light">
 
 <div class="container py-5">
 
-    <!-- Page Header -->
-    <div
-        class="d-flex justify-content-between align-items-center mb-4"
-    >
+    <!-- Header -->
+    <div class="d-flex justify-content-between align-items-center mb-4">
 
         <div>
 
-            <h1 class="mb-1">
+            <h1 class="h3 mb-1">
                 Edit Gallery Item
             </h1>
 
             <p class="text-muted mb-0">
-                Update the selected gallery item.
+                Update the gallery item or replace its image.
             </p>
 
         </div>
 
         <a
             href="index.php"
-            class="btn btn-secondary"
+            class="btn btn-outline-secondary"
         >
-            ← Back to Gallery
+            Back to Gallery
         </a>
 
     </div>
 
 
-    <!-- Error Messages -->
+    <!-- Errors -->
+
     <?php if (!empty($errors)): ?>
 
         <div class="alert alert-danger">
 
-            <h5 class="alert-heading">
-                Please correct the following:
-            </h5>
+            <strong>Please correct the following:</strong>
 
-            <ul class="mb-0">
+            <ul class="mb-0 mt-2">
 
                 <?php foreach ($errors as $error): ?>
 
@@ -358,7 +338,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         class="form-label"
                     >
                         Gallery Title
-                        <span class="text-danger">*</span>
                     </label>
 
                     <input
@@ -367,60 +346,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         id="title"
                         name="title"
                         value="<?= htmlspecialchars($title) ?>"
-                        required
                     >
-
-                </div>
-
-
-                <!-- Current Image -->
-                <div class="mb-3">
-
-                    <label class="form-label">
-                        Current Image
-                    </label>
-
-                    <div>
-
-                        <img
-                            src="../../<?= htmlspecialchars($currentImage) ?>"
-                            alt="<?= htmlspecialchars($title) ?>"
-                            class="img-thumbnail"
-                            style="
-                                max-width: 300px;
-                                max-height: 220px;
-                                object-fit: cover;
-                            "
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <!-- New Image -->
-                <div class="mb-3">
-
-                    <label
-                        for="image"
-                        class="form-label"
-                    >
-                        Replace Image
-                    </label>
-
-                    <input
-                        type="file"
-                        class="form-control"
-                        id="image"
-                        name="image"
-                        accept=".jpg,.jpeg,.png,.webp"
-                    >
-
-                    <div class="form-text">
-                        Leave this empty to keep the current image.
-                        Accepted formats: JPG, JPEG, PNG, WEBP.
-                        Maximum size: 5MB.
-                    </div>
 
                 </div>
 
@@ -441,8 +367,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         id="category"
                         name="category"
                         value="<?= htmlspecialchars($category) ?>"
-                        placeholder="e.g. Projects, Events, Leadership"
+                        placeholder="e.g. Conferences, Training, Leadership"
                     >
+
+                </div>
+
+
+                <!-- Current Image -->
+                <div class="mb-3">
+
+                    <label class="form-label">
+                        Current Image
+                    </label>
+
+                    <?php
+                    $currentImagePath =
+                        '../../' . ltrim($currentImage, '/');
+                    ?>
+
+                    <?php if (
+                        !empty($currentImage) &&
+                        is_file($currentImagePath)
+                    ): ?>
+
+                        <div class="mb-2">
+
+                            <img
+                                src="../../<?= htmlspecialchars(
+                                    ltrim($currentImage, '/')
+                                ) ?>"
+                                alt="<?= htmlspecialchars($title) ?>"
+                                class="img-thumbnail"
+                                style="
+                                    max-width: 300px;
+                                    max-height: 220px;
+                                    object-fit: cover;
+                                "
+                            >
+
+                        </div>
+
+                    <?php else: ?>
+
+                        <p class="text-muted">
+                            Current image is not available.
+                        </p>
+
+                    <?php endif; ?>
+
+                </div>
+
+
+                <!-- Replacement Image -->
+                <div class="mb-3">
+
+                    <label
+                        for="image"
+                        class="form-label"
+                    >
+                        Replace Image
+                    </label>
+
+                    <input
+                        type="file"
+                        class="form-control"
+                        id="image"
+                        name="image"
+                        accept=".jpg,.jpeg,.png,.webp"
+                    >
+
+                    <div class="form-text">
+                        Leave empty to keep the current image.
+                        JPG, JPEG, PNG, or WEBP. Maximum size: 5 MB.
+                    </div>
 
                 </div>
 
@@ -462,7 +459,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         id="description"
                         name="description"
                         rows="5"
-                        placeholder="Briefly describe this gallery image..."
                     ><?= htmlspecialchars($description) ?></textarea>
 
                 </div>
@@ -487,14 +483,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         min="0"
                     >
 
-                    <div class="form-text">
-                        Lower numbers appear first.
-                    </div>
-
                 </div>
 
 
-                <!-- Buttons -->
                 <div class="d-flex gap-2">
 
                     <button

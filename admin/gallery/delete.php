@@ -8,19 +8,22 @@ require_once '../../includes/auth/auth.php';
 
 requireLogin();
 
-// Get gallery ID
-$id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
+// Only allow POST requests
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: index.php?delete_error=1');
+    exit;
+}
+
+$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
 
 if ($id <= 0) {
     header('Location: index.php?invalid_id=1');
     exit;
 }
 
-// Get gallery item
+// Fetch gallery item before deleting it
 $stmt = $pdo->prepare("
-    SELECT
-        id,
-        image
+    SELECT id, image
     FROM gallery
     WHERE id = ?
     LIMIT 1
@@ -28,12 +31,14 @@ $stmt = $pdo->prepare("
 
 $stmt->execute([$id]);
 
-$gallery = $stmt->fetch(PDO::FETCH_ASSOC);
+$galleryItem = $stmt->fetch(PDO::FETCH_ASSOC);
 
-if (!$gallery) {
+if (!$galleryItem) {
     header('Location: index.php?not_found=1');
     exit;
 }
+
+$imagePath = $galleryItem['image'];
 
 // Delete database record
 $stmt = $pdo->prepare("
@@ -41,29 +46,47 @@ $stmt = $pdo->prepare("
     WHERE id = ?
 ");
 
-$success = $stmt->execute([$id]);
+try {
 
-if ($success) {
+    $stmt->execute([$id]);
 
-    // Delete associated image from uploads folder
-    if (
-        !empty($gallery['image']) &&
-        strpos($gallery['image'], 'assets/uploads/gallery/') === 0
-    ) {
+    /*
+     * Delete the associated image only after
+     * the database record has been successfully deleted.
+     */
+    if (!empty($imagePath)) {
 
-        $imagePath = '../../' . $gallery['image'];
+        $uploadDirectory =
+            realpath('../../assets/uploads/gallery/');
 
+        $filePath =
+            realpath(
+                '../../' . ltrim($imagePath, '/')
+            );
+
+        /*
+         * Security check:
+         * Only allow deletion of files that are physically
+         * inside the gallery upload directory.
+         */
         if (
-            file_exists($imagePath) &&
-            is_file($imagePath)
+            $uploadDirectory !== false &&
+            $filePath !== false &&
+            strpos(
+                $filePath,
+                $uploadDirectory . DIRECTORY_SEPARATOR
+            ) === 0 &&
+            is_file($filePath)
         ) {
-            unlink($imagePath);
+            unlink($filePath);
         }
     }
 
     header('Location: index.php?deleted=1');
     exit;
-}
 
-header('Location: index.php?delete_error=1');
-exit;
+} catch (PDOException $e) {
+
+    header('Location: index.php?delete_error=1');
+    exit;
+}
